@@ -1,3 +1,18 @@
+/*
+ * Copyright 2016 Fritz Elfert
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.github.felfert.watools;
 
 import java.io.File;
@@ -40,19 +55,21 @@ public class WhatsAppCryptoInputStream extends FilterInputStream {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(WhatsAppCryptoInputStream.class);
 
-    /**
-     * Describes the currently supported variants.
-     */
-    public static enum CRYPTVERSION {
-        WACRYPT5,
-        WACRYPT7,
-        WACRYPT8,
-        WACRYPT12
-    }
-
     private static final String CRYPTO_PROVIDER_PROPKEY = "com.github.felfert.watools.CryptoProvider";
     private static final String CRYPTO_PROVIDER_DEFAULT = "org.bouncycastle.jce.provider.BouncyCastleProvider";
     private static final String CRYPTO_PROVIDER = System.getProperty(CRYPTO_PROVIDER_PROPKEY, CRYPTO_PROVIDER_DEFAULT);
+
+    /**
+     * Creates a new instance from a database file and a key file.
+     *
+     * @param infile The encrypted database file.
+     * <p>The {@link WhatsAppCryptoVersion} is chosen according to the extension of the file name.</p>
+     * @param keyfile The corresponding key file.
+     * @throws IOException if initialization fails.
+     */
+    public WhatsAppCryptoInputStream(@Nonnull final File infile, @Nonnull final File keyfile) throws IOException {
+        this(new FileInputStream(infile), WhatsAppCryptoVersion.fromFile(infile), getKeyMaterialFromFile(keyfile));
+    }
 
     /**
      * Creates a new instance from a database file and a key file.
@@ -61,7 +78,8 @@ public class WhatsAppCryptoInputStream extends FilterInputStream {
      * @param keyfile The corresponding key file.
      * @throws IOException if initialization fails.
      */
-    public WhatsAppCryptoInputStream(@Nonnull final File infile, CRYPTVERSION v, @Nonnull final File keyfile) throws IOException {
+    public WhatsAppCryptoInputStream(@Nonnull final File infile, WhatsAppCryptoVersion v,
+            @Nonnull final File keyfile) throws IOException {
         this(new FileInputStream(infile), v, getKeyMaterialFromFile(keyfile));
     }
 
@@ -72,7 +90,7 @@ public class WhatsAppCryptoInputStream extends FilterInputStream {
      * @throws IOException if initialization fails.
      */
     public WhatsAppCryptoInputStream(@Nonnull final File infile, @Nonnull final String account) throws IOException {
-        this(new FileInputStream(infile), CRYPTVERSION.WACRYPT5, account.getBytes(StandardCharsets.UTF_8));
+        this(new FileInputStream(infile), WhatsAppCryptoVersion.CRYPT5, account.getBytes(StandardCharsets.UTF_8));
     }
 
     /**
@@ -81,8 +99,9 @@ public class WhatsAppCryptoInputStream extends FilterInputStream {
      * @param account The account name to use.
      * @throws IOException if initialization fails.
      */
-    public WhatsAppCryptoInputStream(@Nonnull final InputStream indata, @Nonnull final String account) throws IOException {
-        this(indata, CRYPTVERSION.WACRYPT5, account.getBytes(StandardCharsets.UTF_8));
+    public WhatsAppCryptoInputStream(@Nonnull final InputStream indata, @Nonnull final String account)
+            throws IOException {
+        this(indata, WhatsAppCryptoVersion.CRYPT5, account.getBytes(StandardCharsets.UTF_8));
     }
 
     /**
@@ -90,24 +109,27 @@ public class WhatsAppCryptoInputStream extends FilterInputStream {
      * @param indata The underlying encrypted input stream.
      * @param v The version of encryption.
      * @param keyMaterial The key material to use.
-     * In case of {@link CRYPTVERSION#WACRYPT5}, this is the account name. Otherwise it is
-     * the content of the key file which should always be 158 bytes.
+     * <p>In case of {@link WhatsAppCryptoVersion#CRYPT5}, this is the account name. Otherwise it is
+     * the content of the key file which should always be 158 bytes.</p>
      * @throws IOException if initialization fails.
      */
-    public WhatsAppCryptoInputStream(@Nonnull final InputStream indata, CRYPTVERSION v, @Nonnull final byte[] keyMaterial) throws IOException {
+    public WhatsAppCryptoInputStream(@Nonnull final InputStream indata, WhatsAppCryptoVersion v,
+            @Nonnull final byte[] keyMaterial) throws IOException {
         super(setup(indata, v, keyMaterial));
     }
 
-    private static final byte[] BASE5KEY = DatatypeConverter.parseHexBinary("8d4b155cc9ff81e5cbf6fa7819366a3ec621a656416cd793");
+    private static final byte[] BASE5KEY =
+        DatatypeConverter.parseHexBinary("8d4b155cc9ff81e5cbf6fa7819366a3ec621a656416cd793");
     private static final byte[] BASE5IV = DatatypeConverter.parseHexBinary("1e39f369e90db33aa73b442bbbb6b0b9");
     private static final String AESCBC = "AES/CBC/PKCS5Padding";
     private static final String AESGCM = "AES/GCM/NoPadding";
 
-    private static InputStream setup(@Nonnull final InputStream indata, CRYPTVERSION v, @Nonnull final byte[] keyMaterial) throws IOException {
+    private static InputStream setup(@Nonnull final InputStream indata, WhatsAppCryptoVersion v,
+            @Nonnull final byte[] keyMaterial) throws IOException {
         byte[] key;
         byte[] iv;
         switch (v) {
-            case WACRYPT5:
+            case CRYPT5:
                 final byte[] accountMD5 = getMD5().digest(keyMaterial);
                 key = new byte[BASE5KEY.length];
                 for (int i = 0; i < BASE5KEY.length; i++) {
@@ -115,18 +137,18 @@ public class WhatsAppCryptoInputStream extends FilterInputStream {
                 }
                 iv = Arrays.copyOf(BASE5IV, BASE5IV.length);
                 return new CipherInputStream(indata, createCipher(AESCBC, key, iv));
-            case WACRYPT7:
+            case CRYPT7:
                 checkKeyMaterial(keyMaterial, 158);
                 iv = Arrays.copyOfRange(keyMaterial, 110, 126);
                 key = Arrays.copyOfRange(keyMaterial, 126, 158);
                 return new CipherInputStream(indata, createCipher(AESCBC, key, iv));
-            case WACRYPT8:
+            case CRYPT8:
                 checkKeyMaterial(keyMaterial, 158);
                 key = Arrays.copyOfRange(keyMaterial, 126, 158);
                 iv = getIvFromInput(indata, keyMaterial);
                 return new InflaterInputStream(new CipherInputStream(indata,
                             createCipher(AESCBC, key, iv)), new Inflater(false));
-            case WACRYPT12:
+            case CRYPT12:
                 checkKeyMaterial(keyMaterial, 158);
                 key = Arrays.copyOfRange(keyMaterial, 126, 158);
                 iv = getIvFromInput(indata, keyMaterial);
@@ -138,14 +160,16 @@ public class WhatsAppCryptoInputStream extends FilterInputStream {
     }
 
     @Nonnull
-    private static Cipher createCipher(@Nonnull final String spec, @Nonnull final byte[] key, @Nonnull final byte[] iv) throws IOException {
+    private static Cipher createCipher(@Nonnull final String spec, @Nonnull final byte[] key,
+            @Nonnull final byte[] iv) throws IOException {
         LOGGER.debug("Using cipher {} with key of {} bytes and IV of {} bytes", spec, key.length, iv.length);
         try {
             insertCustomProvider();
             Cipher cipher = Cipher.getInstance(spec);
             cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
             return cipher;
-        } catch (NoSuchAlgorithmException | InvalidKeyException | InvalidAlgorithmParameterException | NoSuchPaddingException x) {
+        } catch (NoSuchAlgorithmException | InvalidKeyException |
+                InvalidAlgorithmParameterException | NoSuchPaddingException x) {
             throw new IOException("Could not initialize decryption", x);
         }
     }
@@ -172,7 +196,8 @@ public class WhatsAppCryptoInputStream extends FilterInputStream {
     }
 
     @Nonnull
-    private static byte[] getIvFromInput(@Nonnull final InputStream is, @Nonnull byte[] keyMaterial) throws IOException {
+    private static byte[] getIvFromInput(@Nonnull final InputStream is, @Nonnull byte[] keyMaterial)
+            throws IOException {
         int idx = 0;
         int remaining = 67;
         byte[] buf = new byte[remaining];
@@ -210,7 +235,7 @@ public class WhatsAppCryptoInputStream extends FilterInputStream {
     }
 
     @Nonnull
-    private static final MessageDigest getMD5() {
+    private static MessageDigest getMD5() {
         try {
             return MessageDigest.getInstance("MD5");
         } catch (NoSuchAlgorithmException x) {
