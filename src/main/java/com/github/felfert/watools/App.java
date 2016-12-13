@@ -15,14 +15,29 @@
  */
 package com.github.felfert.watools;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.ObjectInputStream;
 
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.PosixFilePermissions;
+
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
+
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 
 import org.kohsuke.args4j.Argument;
 import org.kohsuke.args4j.CmdLineException;
@@ -32,6 +47,8 @@ import org.kohsuke.args4j.ParserProperties;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.whatsapp.MediaData;
 
 /**
  * Decrypt a WhatsApp backup.
@@ -61,7 +78,8 @@ public class App {
     private List<String> arguments = new ArrayList<>();
 
     private enum Action {
-        DECRYPT;
+        DECRYPT,
+        EXTRACTMEDIA;
     }
 
     private String getFirstArg() throws IndexOutOfBoundsException {
@@ -101,6 +119,53 @@ public class App {
         }
         return getArg(error);
     }*/
+
+    private int decrypt(@Nonnull final File outfile) throws IOException {
+        String dbfileName = getArg("Missing positional dbfile argument");
+        if (null == dbfileName) {
+            return 1;
+        }
+        File dbfile = new File(dbfileName);
+        if (null == wcversion) {
+            try {
+                wcversion = WhatsAppCryptoVersion.fromFile(dbfile);
+            } catch (IllegalArgumentException x) {
+                System.err.println("Mandatory crypto version option is missing");
+                return 1;
+            }
+        }
+        WhatsAppCryptoInputStream wcs = null;
+        if (wcversion.equals(WhatsAppCryptoVersion.CRYPT5)) {
+            if (null == account) {
+                System.err.println("Required account parameter is missing");
+                return 1;
+            }
+            wcs = new WhatsAppCryptoInputStream(dbfile, account);
+        } else {
+            if (null == keyfile) {
+                System.err.println("Required key file parameter is missing");
+                return 1;
+            }
+            wcs = new WhatsAppCryptoInputStream(dbfile, wcversion, keyfile);
+        }
+        LOGGER.debug("{}", wcs);
+        Files.copy(wcs, outfile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        return 0;
+    }
+
+    @Nullable
+    private MediaData deserializeMediaData(@Nullable final byte[] data) {
+        if (null != data) {
+            try {
+                ObjectInputStream ois = new ObjectInputStream(new ByteArrayInputStream(data));
+                Object o = ois.readObject();
+                return (MediaData)o;
+            } catch (IOException | ClassNotFoundException | ClassCastException x) {
+                LOGGER.warn("", x);
+            }
+        }
+        return null;
+    }
 
     private int doit(String[] args) throws IOException {
         final ParserProperties pp = ParserProperties.defaults()
@@ -142,6 +207,11 @@ public class App {
                     case DECRYPT:
                         System.out.println("decrypt [-k keyfile|-a account] dbfile outfile");
                         break;
+                    case EXTRACTMEDIA:
+                        System.out.println("extractmedia [-k keyfile|-a account] dbfile");
+                        break;
+                    default:
+                        break;
                 }
             }
             return 0;
@@ -153,40 +223,45 @@ public class App {
         }
         switch (action) {
             case DECRYPT:
-                String dbfileName = getArg("Missing positional dbfile argument");
-                if (null == dbfileName) {
-                    return 1;
-                }
-                File dbfile = new File(dbfileName);
-                if (null == wcversion) {
-                    try {
-                        wcversion = WhatsAppCryptoVersion.fromFile(dbfile);
-                    } catch (IllegalArgumentException x) {
-                        System.err.println("Mandatory crypto version option is missing");
-                        return 1;
-                    }
-                }
-                WhatsAppCryptoInputStream wcs = null;
-                if (wcversion.equals(WhatsAppCryptoVersion.CRYPT5)) {
-                    if (null == account) {
-                        System.err.println("Required account parameter is missing");
-                        return 1;
-                    }
-                    wcs = new WhatsAppCryptoInputStream(dbfile, account);
-                } else {
-                    if (null == keyfile) {
-                        System.err.println("Required key file parameter is missing");
-                        return 1;
-                    }
-                    wcs = new WhatsAppCryptoInputStream(dbfile, wcversion, keyfile);
-                }
-                LOGGER.debug("{}", wcs);
                 String outfileName = getArg("Missing positional outfile argument");
                 if (null == outfileName) {
                     return 1;
                 }
-                File outfile = new File(outfileName);
-                Files.copy(wcs, outfile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                return decrypt(new File(outfileName));
+            case EXTRACTMEDIA:
+                File tmpdb = Files.createTempFile("wa", ".db",
+                        PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))).toFile();
+                tmpdb.deleteOnExit();
+                int ret = decrypt(tmpdb);
+                if (0 == ret) {
+                    String jdbcurl = "jdbc:sqlite:" + tmpdb.getAbsolutePath();
+                    try (Connection conn = DriverManager.getConnection(jdbcurl);
+                            Statement st = conn.createStatement()) {
+                        try (ResultSet rs = st.executeQuery("select * from messages where media_mime_type != ''")) {
+                            while (rs.next()) {
+                                final byte[] raw = rs.getBytes("raw_data");
+                                final String mime = rs.getString("media_mime_type");
+                                final Date ts = new Date(rs.getLong("timestamp"));
+                                final MediaData md = deserializeMediaData(rs.getBytes("thumb_image"));
+                                final String stamp = String.format("%1$tY%1$tm%1$td-%1$tH%1$tM%1$tS", ts);
+                                System.out.println(String.format("mime=%s ts=%s md=%s", mime, stamp, md.toString()));
+                                Path path = Paths.get("raw", stamp + ".jpg");
+                                if (null != mime && mime.equals("image/jpeg")) {
+                                    try {
+                                        Files.write(path, raw);
+                                    } catch (IOException x) {
+                                        LOGGER.warn("{}: {}", path.toString(), x.getMessage());
+                                    }
+                                }
+                            }
+
+                        }
+                    } catch (SQLException x) {
+                        System.err.println(x.getMessage());
+                    }
+                }
+                break;
+            default:
                 break;
         }
         return 0;
